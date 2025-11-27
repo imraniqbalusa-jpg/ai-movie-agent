@@ -2,7 +2,7 @@ name: Daily Movie Agent
 
 on:
   schedule:
-    - cron: "0 3 * * *"   # 3:00 UTC = 8:00 AM Pakistan time
+    - cron: "0 16 * * *"   # 16:00 UTC = 9:00 PM Pakistan time
   workflow_dispatch:       # allows manual run
 
 permissions:
