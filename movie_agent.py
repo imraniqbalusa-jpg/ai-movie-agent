@@ -1,376 +1,233 @@
-import os
-import json
-import time
-from typing import List, Dict, Any, Optional, Set
-
 import requests
-from bs4 import BeautifulSoup
+import json
+import os
+import time
 
-# ========= CONFIG FROM ENV (GitHub Secrets) =========
+# =========================
+# ENVIRONMENT VARIABLES
+# (Loaded from GitHub Secrets)
+# =========================
 
 TMDB_API_KEY = os.getenv("TMDB_API_KEY")
 ULTRA_INSTANCE_ID = os.getenv("ULTRA_INSTANCE_ID")
 ULTRA_TOKEN = os.getenv("ULTRA_TOKEN")
 WHATSAPP_TO = os.getenv("WHATSAPP_TO")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
 HISTORY_FILE = "movie_history.json"
-
 TMDB_BASE_URL = "https://api.themoviedb.org/3"
-ULTRAMSG_CHAT_URL = "https://api.ultramsg.com/{instance}/messages/chat"
-OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions"
-
-# Platforms you accept
-MAJOR_PLATFORMS = {
-    "Netflix",
-    "Amazon Prime Video",
-    "Prime Video",
-    "Disney Plus",
-    "Disney+",
-    "Disney+ Hotstar",
-    "Hotstar",
-    "Apple TV",
-    "Apple iTunes",
-    "YouTube",
-    "YouTube Movies",
-    "ZEE5",
-    "Zee5",
-    "SonyLIV",
-    "Sony LIV"
-}
 
 
-class ConfigError(Exception):
-    pass
+# =========================
+# HISTORY (NO REPEAT MOVIES)
+# =========================
 
-
-def check_config() -> None:
-    missing = []
-    if not TMDB_API_KEY:
-        missing.append("TMDB_API_KEY")
-    if not ULTRA_INSTANCE_ID:
-        missing.append("ULTRA_INSTANCE_ID")
-    if not ULTRA_TOKEN:
-        missing.append("ULTRA_TOKEN")
-    if not WHATSAPP_TO:
-        missing.append("WHATSAPP_TO")
-    if missing:
-        raise ConfigError(f"Missing required environment variables: {', '.join(missing)}")
-
-
-# ========= HISTORY MANAGEMENT =========
-
-def load_history() -> Set[int]:
+def load_history():
     if not os.path.exists(HISTORY_FILE):
-        return set()
+        return {"tmdb_ids": []}
     try:
-        with open(HISTORY_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return set(data.get("tmdb_ids", []))
-    except Exception:
-        return set()
+        with open(HISTORY_FILE, "r") as f:
+            return json.load(f)
+    except:
+        return {"tmdb_ids": []}
 
 
-def save_history(history_ids: Set[int]) -> None:
-    with open(HISTORY_FILE, "w", encoding="utf-8") as f:
-        json.dump({"tmdb_ids": sorted(list(history_ids))}, f, indent=2)
+def save_history(history):
+    with open(HISTORY_FILE, "w") as f:
+        json.dump(history, f, indent=4)
 
 
-# ========= TMDB HELPERS =========
+# =========================
+# TMDB HELPERS
+# =========================
 
-def tmdb_get(path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def tmdb_get(path, params=None):
     if params is None:
         params = {}
     params["api_key"] = TMDB_API_KEY
-    resp = requests.get(f"{TMDB_BASE_URL}{path}", params=params, timeout=15)
-    resp.raise_for_status()
-    return resp.json()
+
+    r = requests.get(f"{TMDB_BASE_URL}{path}", params=params)
+    r.raise_for_status()
+    return r.json()
 
 
-def discover_movies(page: int = 1) -> Dict[str, Any]:
+def discover_movies(page=1):
+    """Top-rated movies, sorted by rating."""
     params = {
         "sort_by": "vote_average.desc",
-        "vote_count.gte": 500,
+        "vote_count.gte": 1000,
         "primary_release_date.gte": "1990-01-01",
         "include_adult": "false",
-        "page": page,
+        "page": page
     }
-    return tmdb_get("/discover/movie", params=params)
+    return tmdb_get("/discover/movie", params)
 
 
-def get_movie_details(tmdb_id: int) -> Dict[str, Any]:
-    return tmdb_get(f"/movie/{tmdb_id}", {
-        "append_to_response": "credits,external_ids,videos"
-    })
+def get_movie_details(movie_id):
+    params = {
+        "append_to_response": "credits,videos,external_ids"
+    }
+    return tmdb_get(f"/movie/{movie_id}", params)
 
 
-def get_watch_providers(tmdb_id: int) -> Dict[str, Any]:
-    return tmdb_get(f"/movie/{tmdb_id}/watch/providers")
+# =========================
+# AI NUDITY SUMMARY (Qwen 2.5)
+# =========================
 
+def generate_nudity_info(title, genres, overview):
+    prompt = f"""
+    Your task is to summarize any nudity, sensuality, or intimate content in a movie.
 
-def has_required_language(details: Dict[str, Any]) -> bool:
-    langs = {l.get("iso_639_1") for l in details.get("spoken_languages", [])}
-    return "en" in langs or "hi" in langs
+    Movie Title: {title}
+    Genres: {genres}
+    Plot Summary: {overview}
 
+    Rules:
+    - If the movie contains nudity, estimate the number of scenes (approximate).
+    - If there is no nudity, clearly say: "This movie contains no nudity."
+    - Keep it CLEAN, SHORT, and NON-EXPLICIT.
+    """
 
-def extract_major_platforms(providers: Dict[str, Any]) -> List[str]:
-    results = providers.get("results", {})
-    platforms = set()
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "HTTP-Referer": "https://github.com",
+        "X-Title": "Daily Movie Agent"
+    }
 
-    for region in ("IN", "US", "GB"):
-        region_data = results.get(region, {})
-        for key in ("flatrate", "rent", "buy", "ads"):
-            for item in region_data.get(key, []) or []:
-                name = item.get("provider_name")
-                if name and name in MAJOR_PLATFORMS:
-                    platforms.add(name)
-
-    return sorted(platforms)
-
-
-def extract_director(details):
-    for member in details.get("credits", {}).get("crew", []):
-        if member.get("job") == "Director":
-            return member.get("name")
-    return None
-
-
-def extract_main_cast(details, limit=4):
-    return [c.get("name") for c in details.get("credits", {}).get("cast", [])[:limit]]
-
-
-def extract_trailer(details):
-    videos = details.get("videos", {}).get("results", [])
-    for v in videos:
-        if v.get("site") == "YouTube" and v.get("type") == "Trailer":
-            return f"https://www.youtube.com/watch?v={v.get('key')}"
-    return None
-
-
-# ========= NUDITY ANALYSIS (HYBRID) =========
-
-def fetch_parents_guide(imdb_id: str) -> Optional[str]:
-    if not imdb_id:
-        return None
-
-    url = f"https://www.imdb.com/title/{imdb_id}/parentalguide"
-    try:
-        resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
-        if resp.status_code != 200:
-            return None
-
-        soup = BeautifulSoup(resp.text, "html.parser")
-        return soup.get_text(separator="\n")[:8000]
-    except:
-        return None
-
-
-def analyze_nudity(text: str) -> Optional[str]:
-    if not OPENAI_API_KEY or not text:
-        return None
-
-    prompt = (
-        "Your job is to read the IMDb Parents Guide text and extract only nudity/sexual content. "
-        "Estimate the number of nude or sexual scenes. Provide a JSON response like: "
-        '{ "approx_nude_scenes": <number>, "summary": "<short summary>" }.'
-    )
+    data = {
+        "model": "qwen/qwen-2.5",
+        "messages": [{"role": "user", "content": prompt}]
+    }
 
     try:
-        r = requests.post(
-            OPENAI_CHAT_URL,
-            headers={
-                "Authorization": f"Bearer {OPENAI_API_KEY}",
-                "Content-Type": "application/json"
-            },
-            json={
-                "model": "gpt-4.1-mini",
-                "messages": [
-                    {"role": "system", "content": "You classify nudity/sexual content safely."},
-                    {"role": "user", "content": prompt},
-                    {"role": "user", "content": text},
-                ],
-                "temperature": 0.1
-            },
-            timeout=30
-        )
-        data = r.json()
-        content = data["choices"][0]["message"]["content"]
-
-        import json as _json
-        if content.startswith("```"):
-            content = content.strip("`")
-            if content.lower().startswith("json"):
-                content = content[4:].strip()
-
-        parsed = _json.loads(content)
-        n = parsed.get("approx_nude_scenes")
-        summary = parsed.get("summary")
-        if isinstance(n, (int, float)) and summary:
-            return f"Approx. {int(n)} nude/sexual scenes. {summary}"
-        return None
+        r = requests.post("https://openrouter.ai/api/v1/chat/completions", json=data, headers=headers)
+        return r.json()["choices"][0]["message"]["content"]
     except:
-        return None
-
-
-def get_nudity_info(imdb_id: str) -> str:
-    text = fetch_parents_guide(imdb_id)
-    if not text:
         return "Nudity info unavailable."
 
-    ai = analyze_nudity(text)
-    return ai or "Nudity info unavailable."
 
+# =========================
+# WHATSAPP SENDER
+# =========================
 
-# ========= MOVIE SELECTION =========
+def send_whatsapp_message(text):
+    url = f"https://api.ultramsg.com/{ULTRA_INSTANCE_ID}/messages/chat"
 
-def pick_movies(history: Set[int], count=3) -> List[Dict[str, Any]]:
-    movies = []
-    max_pages = 5
-
-    for page in range(1, max_pages + 1):
-        print("Scanning page:", page)
-        try:
-            data = discover_movies(page)
-        except:
-            continue
-
-        for item in data.get("results", []):
-            tmdb_id = item.get("id")
-            if not tmdb_id or tmdb_id in history:
-                continue
-
-            rating = float(item.get("vote_average") or 0)
-            if rating < 7:
-                continue
-
-            try:
-                details = get_movie_details(tmdb_id)
-                providers = get_watch_providers(tmdb_id)
-            except:
-                continue
-
-            if not has_required_language(details):
-                continue
-
-            platforms = extract_major_platforms(providers)
-            if not platforms:
-                continue
-
-            imdb_id = details.get("external_ids", {}).get("imdb_id")
-
-            movies.append({
-                "tmdb_id": tmdb_id,
-                "title": details.get("title"),
-                "year": (details.get("release_date", "") or "")[:4],
-                "overview": details.get("overview"),
-                "runtime": details.get("runtime"),
-                "genres": [g.get("name") for g in details.get("genres", [])],
-                "director": extract_director(details),
-                "cast": extract_main_cast(details),
-                "languages": [l.get("english_name") for l in details.get("spoken_languages", [])],
-                "rating": rating,
-                "platforms": platforms,
-                "imdb_id": imdb_id,
-                "trailer": extract_trailer(details),
-            })
-
-        time.sleep(0.4)
-
-        if len(movies) >= 25:
-            break
-
-    movies.sort(key=lambda m: m["rating"], reverse=True)
-
-    final = []
-    def pick_range(low, high):
-        nonlocal final
-        if len(final) >= count:
-            return
-        for m in movies:
-            if m in final:
-                continue
-            if low <= m["rating"] <= high:
-                final.append(m)
-                if len(final) == count:
-                    break
-
-    pick_range(9, 10)
-    pick_range(8, 8.9)
-    pick_range(7, 7.9)
-
-    if len(final) < count:
-        for m in movies:
-            if m not in final:
-                final.append(m)
-                if len(final) == count:
-                    break
-
-    return final[:count]
-
-
-# ========= WHATSAPP MESSAGE =========
-
-def format_movie(m):
-    lines = [
-        f"🎬 {m['title']} ({m['year']})",
-        f"⭐ Rating: {m['rating']}",
-        f"⏱ Runtime: {m['runtime']} min",
-        f"🎭 Genres: {', '.join(m['genres'])}",
-        f"🎬 Director: {m['director']}",
-        f"👥 Cast: {', '.join(m['cast'])}",
-        f"🌐 Languages: {', '.join(m['languages'])}",
-        f"📺 Platforms: {', '.join(m['platforms'])}",
-        f"📹 Trailer: {m['trailer'] or 'N/A'}",
-        "",
-        m["overview"] or "",
-        "",
-        f"🔞 {m['nudity_info']}",
-    ]
-    return "\n".join(lines)
-
-
-def send_whatsapp(text):
-    url = ULTRAMSG_CHAT_URL.format(instance=ULTRA_INSTANCE_ID)
-    r = requests.post(url, data={
+    payload = {
         "token": ULTRA_TOKEN,
         "to": WHATSAPP_TO,
-        "body": text,
-    }, timeout=15)
+        "body": text
+    }
+
+    r = requests.post(url, data=payload)
     print("WhatsApp Response:", r.text)
 
 
-# ========= MAIN =========
+# =========================
+# MOVIE SELECTION
+# =========================
+
+def pick_movies():
+    history = load_history()
+    used_ids = set(history["tmdb_ids"])
+
+    movies_collected = []
+
+    for page in range(1, 4):  # scan first 3 pages of top movies
+        print(f"Scanning TMDB page {page}...")
+        data = discover_movies(page)
+        results = data.get("results", [])
+
+        for m in results:
+            mid = m["id"]
+            if mid not in used_ids:
+                movies_collected.append(m)
+            if len(movies_collected) == 3:
+                break
+
+        if len(movies_collected) == 3:
+            break
+
+        time.sleep(0.3)
+
+    # Update history
+    for m in movies_collected:
+        history["tmdb_ids"].append(m["id"])
+    save_history(history)
+
+    return movies_collected
+
+
+# =========================
+# MESSAGE BUILDER
+# =========================
+
+def build_movie_message(movie):
+    details = get_movie_details(movie["id"])
+
+    title = details.get("title", "Unknown")
+    year = details.get("release_date", "")[:4]
+    rating = details.get("vote_average")
+    runtime = details.get("runtime", "N/A")
+    genres = ", ".join([g["name"] for g in details.get("genres", [])])
+    overview = details.get("overview", "No overview available.")
+
+    # Director
+    director = "Unknown"
+    for c in details.get("credits", {}).get("crew", []):
+        if c.get("job") == "Director":
+            director = c.get("name")
+            break
+
+    # Cast
+    cast = ", ".join([c["name"] for c in details.get("credits", {}).get("cast", [])[:4]])
+
+    # Languages
+    spoken = details.get("spoken_languages", [])
+    languages = ", ".join([l.get("english_name", "N/A") for l in spoken])
+
+    # Trailer
+    trailer_url = "Unavailable"
+    videos = details.get("videos", {}).get("results", [])
+    for v in videos:
+        if v.get("type") == "Trailer" and v.get("site") == "YouTube":
+            trailer_url = f"https://www.youtube.com/watch?v={v.get('key')}"
+            break
+
+    # Nudity summary (AI)
+    nudity_info = generate_nudity_info(title, genres, overview)
+
+    return f"""
+🎬 *{title}* ({year})
+⭐ Rating: {rating}
+⏱ Runtime: {runtime} min
+🎭 Genres: {genres}
+🎬 Director: {director}
+🎤 Cast: {cast}
+🌐 Languages: {languages}
+📺 Trailer: {trailer_url}
+
+🧩 *Nudity & Intimacy Info:*  
+{nudity_info}
+
+----------------------------------------
+"""
+
+
+# =========================
+# MAIN SCRIPT
+# =========================
 
 def main():
-    try:
-        check_config()
-    except Exception as e:
-        print("CONFIG ERROR:", e)
-        return
+    movies = pick_movies()
 
-    history = load_history()
-    movies = pick_movies(history)
-
-    if not movies:
-        send_whatsapp("No movies found today.")
-        return
-
+    message = "🎥 *Your 3 Movies for Today*\n\n----------------------------------------\n"
     for m in movies:
-        if m.get("imdb_id"):
-            m["nudity_info"] = get_nudity_info(m["imdb_id"])
-        else:
-            m["nudity_info"] = "Nudity info unavailable."
+        message += build_movie_message(m)
 
-    text = "Here are your 3 movies for today:\n\n" + "\n\n" + ("-"*35) + "\n\n"
-    text += ("\n" + ("-"*35) + "\n\n").join(format_movie(m) for m in movies)
-
-    send_whatsapp(text)
-
-    for m in movies:
-        history.add(m["tmdb_id"])
-
-    save_history(history)
+    send_whatsapp_message(message)
 
 
 if __name__ == "__main__":
     main()
+
