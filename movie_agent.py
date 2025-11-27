@@ -95,15 +95,27 @@ def generate_nudity_info(title, genres, overview):
     }
 
     data = {
-        "model": "qwen/qwen-2.5",
-        "messages": [{"role": "user", "content": prompt}]
+        "model": "qwen/qwen-2.5-7b-instruct",
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.3
     }
 
     try:
-        r = requests.post("https://openrouter.ai/api/v1/chat/completions", json=data, headers=headers)
-        return r.json()["choices"][0]["message"]["content"]
-    except:
+        r = requests.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            json=data,
+            headers=headers
+        )
+        result = r.json()
+
+        # Debug line (shows exact error if failing)
+        print("OpenRouter response:", result)
+
+        return result["choices"][0]["message"]["content"]
+    except Exception as e:
+        print("OpenRouter ERROR:", e)
         return "Nudity info unavailable."
+
 
 
 # =========================
