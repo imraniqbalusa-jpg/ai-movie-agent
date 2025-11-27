@@ -1,0 +1,49 @@
+name: Daily Movie Agent
+
+on:
+  schedule:
+    - cron: "0 3 * * *"   # 3:00 UTC = 8:00 AM Pakistan time
+  workflow_dispatch:       # allows manual run
+
+permissions:
+  contents: write           # to update movie_history.json
+
+jobs:
+  run-agent:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run movie agent
+        env:
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+          ULTRA_INSTANCE_ID: ${{ secrets.ULTRA_INSTANCE_ID }}
+          ULTRA_TOKEN: ${{ secrets.ULTRA_TOKEN }}
+          WHATSAPP_TO: ${{ secrets.WHATSAPP_TO }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          python movie_agent.py
+
+      - name: Commit updated movie history
+        run: |
+          if git diff --quiet movie_history.json; then
+            echo "No changes to commit"
+          else
+            git config user.name "${{ github.actor }}"
+            git config user.email "${{ github.actor }}@users.noreply.github.com"
+            git add movie_history.json
+            git commit -m "Update movie history [skip ci]"
+            git push
+          fi
