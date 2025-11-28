@@ -361,6 +361,7 @@ def build_whatsapp_message(movies, theme_label):
     - Streaming providers
     - Trailer link
     - Short summary
+    And visual separators between movies.
     """
     today_pk = get_today_pk()
     date_str = today_pk.strftime("%A, %d %B %Y")
@@ -372,6 +373,8 @@ def build_whatsapp_message(movies, theme_label):
     lines.append("────────────────────")
     lines.append("Here are 3 picks for tonight (rating ≥ 5.0):")
     lines.append("")
+
+    total = len(movies)
 
     for idx, m in enumerate(movies, start=1):
         title = m.get("title") or m.get("name") or "Unknown title"
@@ -432,7 +435,12 @@ def build_whatsapp_message(movies, theme_label):
             lines.append("   ▶️ Trailer: Not available")
         if overview:
             lines.append(f"   📝 Summary: {overview}")
-        lines.append("")  # blank line between movies
+        lines.append("")  # blank after movie block
+
+        # Add a separator line after 1st and 2nd movie (i.e., if not last)
+        if idx < total:
+            lines.append("────────────────────")
+            lines.append("")  # extra blank line after separator
 
     lines.append("Enjoy your movies! 🍿")
     return "\n".join(lines)
