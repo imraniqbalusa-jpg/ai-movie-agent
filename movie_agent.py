@@ -11,18 +11,39 @@ WHATSAPP_TO = os.getenv("WHATSAPP_TO")
 
 HISTORY_FILE = "movie_history.json"
 
-# Minimum TMDB rating (approx "IMDb-style", but from TMDB)
+# Never go below this rating (TMDB rating)
 MIN_RATING = 5.0
 
-# How many days before a movie can be repeated
+# How long before a movie can be repeated
 NO_REPEAT_DAYS = 180
 
-# Region to use for certifications (we'll prefer IN, then US)
-CERT_REGIONS_PRIORITY = ["IN", "US"]
+# For age-rating lookup (certifications)
+CERT_REGIONS_PRIORITY = ["IN", "US", "PK"]
+
+# For OTT platforms (watch/providers)
+WATCH_REGION_PRIORITY = ["PK", "IN", "US"]
+MAJOR_PROVIDERS = {
+    "Netflix",
+    "Amazon Prime Video",
+    "Disney Plus",
+    "Hotstar",
+    "JioCinema",
+    "ZEE5",
+    "Zee5",
+    "Sony Liv",
+    "SonyLIV",
+    "Hulu",
+    "HBO Max",
+    "Apple TV",
+    "Apple TV+",
+    "Google Play Movies",
+    "YouTube",
+    "MX Player",
+}
 
 
 def load_history():
-    """Load movie history. Supports old format [id, id] and new [{'id':..,'date':..}]"""
+    """Load movie history. Support old [id, id] and new [{'id':..,'date':..}] formats."""
     if not os.path.exists(HISTORY_FILE):
         return []
 
@@ -38,7 +59,7 @@ def load_history():
             if isinstance(item, dict) and "id" in item and "date" in item:
                 normalized.append(item)
             elif isinstance(item, int):
-                # Old format: just ID, treat as very old so it never blocks repeats
+                # Old format: only ID; treat as very old
                 normalized.append({"id": item, "date": "1970-01-01"})
     return normalized
 
@@ -52,7 +73,6 @@ def save_history(history):
 
 
 def get_today_pk():
-    """Return today's date in Pakistan time."""
     tz = ZoneInfo("Asia/Karachi")
     return datetime.now(tz)
 
@@ -80,7 +100,7 @@ def get_theme_for_today():
     Sunday: Comedy / Feel Good
     """
     today_pk = get_today_pk()
-    weekday = today_pk.weekday()  # Monday = 0, Sunday = 6
+    weekday = today_pk.weekday()  # Monday = 0
 
     if weekday in (0, 1, 2, 3):
         return "mix", "Mix Theme"
@@ -118,8 +138,8 @@ def discover_movies(params, max_pages=3):
 
 def get_movies_for_theme(theme):
     """
-    Return a list of TMDB movie dicts based on theme.
-    We'll always filter by:
+    Get candidate movies from TMDB based on the day's theme.
+    Always enforce:
       - rating >= MIN_RATING
       - vote_count >= 500
       - release date >= 1990-01-01
@@ -135,27 +155,24 @@ def get_movies_for_theme(theme):
     }
 
     if theme == "mix":
-        # No extra filters: just good, reasonably popular movies
         return discover_movies(base_params)
 
     if theme == "horror_thriller":
         params = base_params.copy()
-        # Horror (27), Thriller (53) – AND combination, but it's fine for our use
-        params["with_genres"] = "27,53"
+        params["with_genres"] = "27,53"  # Horror, Thriller
         return discover_movies(params)
 
     if theme == "mystery_war_bollywood":
-        # Part 1: Mystery + War
+        # Part A: Mystery + War
         params_a = base_params.copy()
-        params_a["with_genres"] = "9648,10752"  # Mystery + War
+        params_a["with_genres"] = "9648,10752"  # Mystery, War
         results_a = discover_movies(params_a)
 
-        # Part 2: Bollywood-ish (Hindi language)
+        # Part B: Bollywood-ish (Hindi original language)
         params_b = base_params.copy()
         params_b["with_original_language"] = "hi"
         results_b = discover_movies(params_b)
 
-        # Merge and de-duplicate by id
         merged = {}
         for m in results_a + results_b:
             merged[m["id"]] = m
@@ -163,23 +180,23 @@ def get_movies_for_theme(theme):
 
     if theme == "comedy_feelgood":
         params = base_params.copy()
-        # Comedy (35), Family (10751), Romance (10749)
+        # Comedy, Family, Romance
         params["with_genres"] = "35,10751,10749"
         return discover_movies(params)
 
-    # Fallback to mix if unknown
+    # Fallback
     return discover_movies(base_params)
 
 
 def get_movie_details(movie_id):
     """
-    Fetch detailed movie info including credits and release_dates (for age rating).
+    Fetch detailed movie info including credits, release dates and videos (for trailer).
     """
     url = f"https://api.themoviedb.org/3/movie/{movie_id}"
     params = {
         "api_key": TMDB_API_KEY,
         "language": "en-US",
-        "append_to_response": "credits,release_dates",
+        "append_to_response": "credits,release_dates,videos",
     }
     resp = requests.get(url, params=params)
     if resp.status_code != 200:
@@ -190,14 +207,14 @@ def get_movie_details(movie_id):
 
 def map_certification_to_age_bucket(cert):
     """
-    Map TMDB certification to 13+ / 16+ / 18+ style buckets.
+    Map a certification (PG-13, A, 18, etc.) to a simple 13+/16+/18+ bucket.
     """
     if not cert:
         return "Not rated"
 
     c = cert.upper().strip()
 
-    # Very safe / general audiences
+    # General / all ages
     if c in ["G", "PG", "U"] or "ALL" in c:
         return "All ages"
 
@@ -218,8 +235,7 @@ def map_certification_to_age_bucket(cert):
 
 def get_age_rating_from_release_dates(release_dates):
     """
-    Look into release_dates['results'] and try to get a certification
-    for IN first, then US. Then map to our age bucket.
+    Look at release_dates['results'] and try to pick a certification for IN, then US, then PK.
     """
     if not release_dates:
         return "Not rated"
@@ -227,7 +243,6 @@ def get_age_rating_from_release_dates(release_dates):
     results = release_dates.get("results", [])
     chosen_cert = None
 
-    # Try preferred regions in order
     for region in CERT_REGIONS_PRIORITY:
         for entry in results:
             if entry.get("iso_3166_1") == region:
@@ -245,17 +260,118 @@ def get_age_rating_from_release_dates(release_dates):
     return map_certification_to_age_bucket(chosen_cert)
 
 
+def get_trailer_url(movie_details):
+    """
+    Get a YouTube trailer link from the movie's videos.
+    Prefer official Trailer/Teaser, fall back to any YouTube video.
+    """
+    videos = (movie_details.get("videos") or {}).get("results", [])
+
+    # Prefer official trailers/teasers
+    for v in videos:
+        if (
+            v.get("site") == "YouTube"
+            and v.get("type") in {"Trailer", "Teaser"}
+            and not v.get("official") is False
+        ):
+            key = v.get("key")
+            if key:
+                return f"https://www.youtube.com/watch?v={key}"
+
+    # Fallback: any YouTube video
+    for v in videos:
+        if v.get("site") == "YouTube":
+            key = v.get("key")
+            if key:
+                return f"https://www.youtube.com/watch?v={key}"
+
+    return None
+
+
+def get_streaming_providers(movie_id):
+    """
+    Use TMDB watch/providers to get OTT platforms.
+    Try PK, then IN, then US.
+    Prefer flatrate, then rent, then buy.
+    Return a de-duplicated list of provider names, preferring major ones.
+    """
+    url = f"https://api.themoviedb.org/3/movie/{movie_id}/watch/providers"
+    params = {"api_key": TMDB_API_KEY}
+
+    try:
+        resp = requests.get(url, params=params)
+    except Exception as e:
+        print(f"Error fetching watch providers for {movie_id}: {e}")
+        return []
+
+    if resp.status_code != 200:
+        print(f"Watch/providers error for {movie_id}: {resp.status_code} {resp.text}")
+        return []
+
+    data = resp.json()
+    results = data.get("results", {})
+
+    region_data = None
+    for region in WATCH_REGION_PRIORITY:
+        if region in results:
+            region_data = results[region]
+            break
+
+    if not region_data:
+        return []
+
+    providers = []
+    # Prefer flatrate, then rent, then buy
+    for key in ["flatrate", "rent", "buy"]:
+        for p in region_data.get(key, []) or []:
+            name = p.get("provider_name")
+            if name:
+                providers.append(name)
+
+    if not providers:
+        return []
+
+    # Prefer major providers if we find any
+    majors = [p for p in providers if p in MAJOR_PROVIDERS]
+    ordered = majors or providers
+
+    unique = []
+    for p in ordered:
+        if p not in unique:
+            unique.append(p)
+
+    return unique
+
+
+def truncate(text, max_len=380):
+    if not text:
+        return ""
+    text = text.strip()
+    if len(text) <= max_len:
+        return text
+    return text[: max_len - 3].rstrip() + "..."
+
+
 def build_whatsapp_message(movies, theme_label):
     """
-    Build the WhatsApp message text for the selected movies.
+    Build a clean, consistent WhatsApp message with:
+    - Title, year
+    - Rating, age, runtime
+    - Genres, languages, director, cast
+    - Streaming providers
+    - Trailer link
+    - Short summary
     """
     today_pk = get_today_pk()
     date_str = today_pk.strftime("%A, %d %B %Y")
 
     lines = []
-    lines.append(f"🎬 Daily Movie Picks – {date_str}")
-    lines.append(f"Theme: {theme_label}")
-    lines.append("You’ve got 3 movies today (rating never below 5.0):\n")
+    lines.append("🎬 *Daily Movie Picks*")
+    lines.append(f"📅 {date_str}")
+    lines.append(f"🎭 Theme: {theme_label}")
+    lines.append("────────────────────")
+    lines.append("Here are 3 picks for tonight (rating ≥ 5.0):")
+    lines.append("")
 
     for idx, m in enumerate(movies, start=1):
         title = m.get("title") or m.get("name") or "Unknown title"
@@ -263,11 +379,10 @@ def build_whatsapp_message(movies, theme_label):
         year = release_date[:4] if release_date else "N/A"
         rating = m.get("vote_average", 0)
         runtime = m.get("runtime") or 0
-        overview = (m.get("overview") or "").strip()
+        overview = truncate(m.get("overview") or "")
         genres = [g["name"] for g in m.get("genres", [])]
         genre_str = ", ".join(genres) if genres else "N/A"
 
-        # Director
         director = "N/A"
         credits = m.get("credits", {})
         for person in credits.get("crew", []):
@@ -275,37 +390,46 @@ def build_whatsapp_message(movies, theme_label):
                 director = person.get("name")
                 break
 
-        # Main cast (top 3)
         cast_list = credits.get("cast", [])[:3]
         cast_names = [c["name"] for c in cast_list]
         cast_str = ", ".join(cast_names) if cast_names else "N/A"
 
-        # Spoken languages
         langs = m.get("spoken_languages", [])
         lang_names = [l["english_name"] for l in langs if l.get("english_name")]
         langs_str = ", ".join(lang_names) if lang_names else "N/A"
 
-        # Age rating
         age_rating = get_age_rating_from_release_dates(m.get("release_dates"))
+        trailer_url = get_trailer_url(m)
+        providers = get_streaming_providers(m.get("id"))
+        if providers:
+            streaming_str = ", ".join(providers)
+        else:
+            streaming_str = "Not available on major platforms (for your region)"
 
-        # Trailer (if any, from videos? not requested now, so skipping for simplicity)
-
+        # Title line
         lines.append(f"{idx}) 🎥 *{title}* ({year})")
-        lines.append(f"   ⭐ Rating: {rating:.1f}")
-        lines.append(f"   🔞 Age rating: {age_rating}")
+
+        # Rating / age / runtime line
+        info_line = f"   ⭐ {rating:.1f} | 🔞 {age_rating}"
         if runtime:
             hours = runtime // 60
             mins = runtime % 60
             if hours > 0:
-                lines.append(f"   ⏱ Runtime: {hours}h {mins}m")
+                info_line += f" | ⏱ {hours}h {mins}m"
             else:
-                lines.append(f"   ⏱ Runtime: {mins}m")
-        else:
-            lines.append("   ⏱ Runtime: N/A")
+                info_line += f" | ⏱ {mins}m"
+        lines.append(info_line)
+
+        # Meta lines
         lines.append(f"   🎭 Genres: {genre_str}")
+        lines.append(f"   🌐 Languages: {langs_str}")
         lines.append(f"   🎬 Director: {director}")
         lines.append(f"   ⭐ Cast: {cast_str}")
-        lines.append(f"   🌐 Languages: {langs_str}")
+        lines.append(f"   📺 Streaming: {streaming_str}")
+        if trailer_url:
+            lines.append(f"   ▶️ Trailer: {trailer_url}")
+        else:
+            lines.append("   ▶️ Trailer: Not available")
         if overview:
             lines.append(f"   📝 Summary: {overview}")
         lines.append("")  # blank line between movies
@@ -349,7 +473,7 @@ def main():
     candidates = get_movies_for_theme(theme)
     print(f"Fetched {len(candidates)} candidate movies from TMDB for theme {theme}")
 
-    # Sort by rating & vote count to prioritize better-known movies
+    # Sort by rating then vote count
     candidates.sort(
         key=lambda m: (m.get("vote_average", 0), m.get("vote_count", 0)),
         reverse=True,
@@ -366,16 +490,15 @@ def main():
         if not movie_id or movie_id in used_ids:
             continue
 
-        # Skip if recently sent
+        # Skip if recently recommended
         if was_recently_sent(movie_id, history, cutoff):
             continue
 
-        # Rating guard (though discover already filters)
+        # Guard rating (though discover already filtered)
         rating = basic.get("vote_average", 0)
         if rating < MIN_RATING:
             continue
 
-        # Fetch full details
         details = get_movie_details(movie_id)
         if not details:
             continue
@@ -387,12 +510,12 @@ def main():
         print("No suitable movies found today.")
         return
 
-    # Update history
+    # Update history with today's picks
     for d in chosen:
         history.append({"id": d.get("id"), "date": today.isoformat()})
     save_history(history)
 
-    # Build and send message
+    # Build and send WhatsApp message
     msg = build_whatsapp_message(chosen, theme_label)
     print("Final WhatsApp message:\n", msg)
     send_whatsapp_message(msg)
