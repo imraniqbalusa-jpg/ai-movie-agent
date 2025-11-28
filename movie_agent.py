@@ -343,6 +343,17 @@ def get_streaming_providers(movie_id):
     return unique
 
 
+def get_poster_url(movie_details):
+    """
+    Build TMDB poster URL if poster_path is available.
+    """
+    poster_path = movie_details.get("poster_path")
+    if not poster_path:
+        return None
+    # w500 is a good size for WhatsApp
+    return f"https://image.tmdb.org/t/p/w500{poster_path}"
+
+
 def truncate(text, max_len=380):
     if not text:
         return ""
@@ -354,14 +365,7 @@ def truncate(text, max_len=380):
 
 def build_whatsapp_message(movies, theme_label):
     """
-    Build a clean, consistent WhatsApp message with:
-    - Title, year
-    - Rating, age, runtime
-    - Genres, languages, director, cast
-    - Streaming providers
-    - Trailer link
-    - Short summary
-    And visual separators between movies.
+    Clean WhatsApp message with separators between movies.
     """
     today_pk = get_today_pk()
     date_str = today_pk.strftime("%A, %d %B %Y")
@@ -435,18 +439,18 @@ def build_whatsapp_message(movies, theme_label):
             lines.append("   ▶️ Trailer: Not available")
         if overview:
             lines.append(f"   📝 Summary: {overview}")
-        lines.append("")  # blank after movie block
+        lines.append("")
 
-        # Add a separator line after 1st and 2nd movie (i.e., if not last)
+        # Separator between movies
         if idx < total:
             lines.append("────────────────────")
-            lines.append("")  # extra blank line after separator
+            lines.append("")
 
     lines.append("Enjoy your movies! 🍿")
     return "\n".join(lines)
 
 
-def send_whatsapp_message(text):
+def send_whatsapp_text(text):
     if not (ULTRA_INSTANCE_ID and ULTRA_TOKEN and WHATSAPP_TO):
         print("Missing UltraMsg configuration, skipping WhatsApp send.")
         print(text)
@@ -461,9 +465,43 @@ def send_whatsapp_message(text):
 
     try:
         resp = requests.post(url, data=payload)
-        print(f"UltraMsg response: {resp.status_code} {resp.text}")
+        print(f"UltraMsg text response: {resp.status_code} {resp.text}")
     except Exception as e:
-        print(f"Failed to send WhatsApp message: {e}")
+        print(f"Failed to send WhatsApp text message: {e}")
+
+
+def send_poster_images(movies):
+    """
+    Send each movie's poster as an image message with a short caption.
+    """
+    if not (ULTRA_INSTANCE_ID and ULTRA_TOKEN and WHATSAPP_TO):
+        print("Missing UltraMsg configuration, skipping poster images.")
+        return
+
+    url = f"https://api.ultramsg.com/{ULTRA_INSTANCE_ID}/messages/image"
+
+    for m in movies:
+        poster_url = get_poster_url(m)
+        if not poster_url:
+            continue
+
+        title = m.get("title") or m.get("name") or "Unknown title"
+        release_date = m.get("release_date") or ""
+        year = release_date[:4] if release_date else ""
+        caption = f"🎥 {title} {f'({year})' if year else ''}".strip()
+
+        payload = {
+            "token": ULTRA_TOKEN,
+            "to": WHATSAPP_TO,
+            "image": poster_url,
+            "caption": caption,
+        }
+
+        try:
+            resp = requests.post(url, data=payload)
+            print(f"UltraMsg image response for {title}: {resp.status_code} {resp.text}")
+        except Exception as e:
+            print(f"Failed to send poster for {title}: {e}")
 
 
 def main():
@@ -523,10 +561,13 @@ def main():
         history.append({"id": d.get("id"), "date": today.isoformat()})
     save_history(history)
 
-    # Build and send WhatsApp message
+    # Build and send WhatsApp text message
     msg = build_whatsapp_message(chosen, theme_label)
     print("Final WhatsApp message:\n", msg)
-    send_whatsapp_message(msg)
+    send_whatsapp_text(msg)
+
+    # Send posters as separate image messages
+    send_poster_images(chosen)
 
 
 if __name__ == "__main__":
